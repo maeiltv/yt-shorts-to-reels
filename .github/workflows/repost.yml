@@ -2,7 +2,7 @@ name: YouTube Shorts to Instagram Reels
 
 on:
   schedule:
-    - cron: "0 23,8,13 * * *"
+    - cron: "0 0,5,13 * * *"
   workflow_dispatch:
     inputs:
       dry_run:
