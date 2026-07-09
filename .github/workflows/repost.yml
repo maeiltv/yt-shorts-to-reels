@@ -35,12 +35,24 @@ jobs:
           pip install -r requirements.txt
           sudo apt-get update && sudo apt-get install -y ffmpeg
 
+      - name: Write YouTube cookies
+        env:
+          YT_COOKIES: ${{ secrets.YT_COOKIES }}
+        run: |
+          if [ -n "$YT_COOKIES" ]; then
+            printf '%s\n' "$YT_COOKIES" > cookies.txt
+            echo "cookies written ($(wc -l < cookies.txt) lines)"
+          else
+            echo "no cookies secret"
+          fi
+
       - name: Run reposter
         env:
           IG_USER_ID: ${{ secrets.IG_USER_ID }}
           IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
           YT_CHANNEL_ID: ${{ secrets.YT_CHANNEL_ID }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COOKIES_FILE: cookies.txt
           MAX_PER_RUN: "1"
           SHORT_MAX_SECONDS: "185"
           CAPTION_TEMPLATE: "{title}"
