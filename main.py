@@ -53,6 +53,8 @@ GH_REPO = os.environ.get("GITHUB_REPOSITORY", "").strip()  # owner/repo
 
 MAX_PER_RUN = int(os.environ.get("MAX_PER_RUN", "1"))
 SHORT_MAX_SECONDS = int(os.environ.get("SHORT_MAX_SECONDS", "185"))
+# 유튜브 봇 차단 우회용 쿠키 파일 경로 (있으면 yt-dlp 에 --cookies 로 전달)
+COOKIES_FILE = os.environ.get("COOKIES_FILE", "").strip()
 CAPTION_TEMPLATE = os.environ.get("CAPTION_TEMPLATE", "{title}")
 DRY_RUN = os.environ.get("DRY_RUN", "").strip() == "1"
 
@@ -120,12 +122,19 @@ def fetch_feed_videos():
 # ---------------------------------------------------------------------------
 # 2) yt-dlp 로 쇼츠 판별
 # ---------------------------------------------------------------------------
+def ytdlp_cookie_args():
+    """쿠키 파일이 존재하고 비어있지 않으면 --cookies 인자를 반환."""
+    if COOKIES_FILE and os.path.exists(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 0:
+        return ["--cookies", COOKIES_FILE]
+    return []
+
+
 def get_video_info(video_id):
     """yt-dlp --dump-json 으로 메타데이터 추출. 실패 시 None."""
     url = f"https://www.youtube.com/watch?v={video_id}"
     try:
         out = subprocess.run(
-            ["yt-dlp", "--dump-json", "--no-warnings", url],
+            ["yt-dlp", *ytdlp_cookie_args(), "--dump-json", "--no-warnings", url],
             capture_output=True, text=True, timeout=120,
         )
     except subprocess.TimeoutExpired:
@@ -160,6 +169,7 @@ def download_video(video_id, workdir):
     out_tmpl = os.path.join(workdir, f"{video_id}.%(ext)s")
     cmd = [
         "yt-dlp",
+        *ytdlp_cookie_args(),
         "-f", "bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a]/b[ext=mp4]/b",
         "--merge-output-format", "mp4",
         "--no-warnings",
@@ -359,9 +369,13 @@ def main():
         vid = v["id"]
         log(f"\n=== [{vid}] {v['title']} ===")
         info = get_video_info(vid)
+        if info is None:
+            # 메타데이터 조회 실패(예: 유튜브 봇 차단) → 기록하지 말고 다음 실행에서 재시도
+            log("  메타데이터 조회 실패 → 기록하지 않고 다음 실행에서 재시도")
+            continue
         if not is_short(info):
             log(f"  쇼츠 아님(가로형이거나 {SHORT_MAX_SECONDS}s 초과) → 건너뜀")
-            posted.add(vid)  # 다시 검사하지 않도록 기록
+            posted.add(vid)  # 진짜 쇼츠가 아닌 경우만 다시 검사하지 않도록 기록
             state["posted"] = sorted(posted)
             save_state(state)
             continue
