@@ -66,6 +66,7 @@ jobs:
           YT_CHANNEL_ID: ${{ secrets.YT_CHANNEL_ID }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COOKIES_FILE: cookies.txt
+          ALSO_STORY: "1"
           MAX_PER_RUN: "3"
           SHORT_MAX_SECONDS: "185"
           CAPTION_TEMPLATE: "{title}"
