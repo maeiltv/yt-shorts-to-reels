@@ -55,6 +55,8 @@ MAX_PER_RUN = int(os.environ.get("MAX_PER_RUN", "1"))
 SHORT_MAX_SECONDS = int(os.environ.get("SHORT_MAX_SECONDS", "185"))
 # 유튜브 봇 차단 우회용 쿠키 파일 경로 (있으면 yt-dlp 에 --cookies 로 전달)
 COOKIES_FILE = os.environ.get("COOKIES_FILE", "").strip()
+# "1" 이면 릴스 발행 후 같은 영상을 스토리로도 발행
+ALSO_STORY = os.environ.get("ALSO_STORY", "").strip() == "1"
 CAPTION_TEMPLATE = os.environ.get("CAPTION_TEMPLATE", "{title}")
 DRY_RUN = os.environ.get("DRY_RUN", "").strip() == "1"
 
@@ -283,18 +285,16 @@ def verify_token():
         die(f"액세스 토큰이 유효하지 않습니다(만료됐을 수 있음). 응답: {detail}")
 
 
-def publish_reel(video_url, caption):
-    # 1) 컨테이너 생성
+def _publish_media(params, label):
+    """컨테이너 생성 -> 처리 대기 -> 발행. 공통 로직."""
     container = graph_post(f"{IG_USER_ID}/media", {
-        "media_type": "REELS",
-        "video_url": video_url,
-        "caption": caption,
+        **params,
         "access_token": IG_TOKEN,
     })
     creation_id = container["id"]
-    log(f"  컨테이너 생성됨: {creation_id}")
+    log(f"  [{label}] 컨테이너 생성됨: {creation_id}")
 
-    # 2) 처리 완료 대기 (최대 약 5분)
+    # 처리 완료 대기 (최대 약 5분)
     for attempt in range(30):
         time.sleep(10)
         st = graph_get(creation_id, {
@@ -302,20 +302,35 @@ def publish_reel(video_url, caption):
             "access_token": IG_TOKEN,
         })
         code = st.get("status_code")
-        log(f"  처리 상태: {code}")
+        log(f"  [{label}] 처리 상태: {code}")
         if code == "FINISHED":
             break
         if code == "ERROR":
-            raise RuntimeError(f"인스타 처리 오류: {st}")
+            raise RuntimeError(f"인스타 처리 오류({label}): {st}")
     else:
-        raise RuntimeError("인스타 영상 처리 대기 타임아웃")
+        raise RuntimeError(f"인스타 영상 처리 대기 타임아웃({label})")
 
-    # 3) 발행
     published = graph_post(f"{IG_USER_ID}/media_publish", {
         "creation_id": creation_id,
         "access_token": IG_TOKEN,
     })
     return published.get("id")
+
+
+def publish_reel(video_url, caption):
+    return _publish_media({
+        "media_type": "REELS",
+        "video_url": video_url,
+        "caption": caption,
+    }, "릴스")
+
+
+def publish_story(video_url):
+    """같은 영상을 스토리로 발행 (스토리는 캡션 미지원)."""
+    return _publish_media({
+        "media_type": "STORIES",
+        "video_url": video_url,
+    }, "스토리")
 
 
 # ---------------------------------------------------------------------------
@@ -404,11 +419,19 @@ def main():
 
         try:
             media_id = publish_reel(public_url, caption)
-            log(f"  ✅ 인스타 발행 완료: media_id={media_id}")
+            log(f"  ✅ 릴스 발행 완료: media_id={media_id}")
             posted.add(vid)
             state["posted"] = sorted(posted)
             save_state(state)
             uploaded += 1
+
+            # 릴스 성공 후 스토리도 발행 (실패해도 릴스에는 영향 없음)
+            if ALSO_STORY:
+                try:
+                    story_id = publish_story(public_url)
+                    log(f"  ✅ 스토리 발행 완료: media_id={story_id}")
+                except Exception as e:
+                    log(f"  ⚠️ 스토리 발행 실패(릴스는 정상): {e}")
         finally:
             delete_asset(asset_id)  # 발행 후 임시 에셋 정리
             try:
