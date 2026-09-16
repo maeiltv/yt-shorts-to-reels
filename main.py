@@ -47,7 +47,8 @@ STATE_FILE = "posted.json"
 # ---------------------------------------------------------------------------
 IG_USER_ID = os.environ.get("IG_USER_ID", "").strip()
 IG_TOKEN = os.environ.get("IG_ACCESS_TOKEN", "").strip()
-YT_CHANNEL_ID = os.environ.get("YT_CHANNEL_ID", "").strip()
+# 쉼표로 구분해 여러 채널 지원 (예: "UCaaa,UCbbb")
+YT_CHANNEL_IDS = [c.strip() for c in os.environ.get("YT_CHANNEL_ID", "").split(",") if c.strip()]
 GH_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
 GH_REPO = os.environ.get("GITHUB_REPOSITORY", "").strip()  # owner/repo
 
@@ -59,8 +60,6 @@ COOKIES_FILE = os.environ.get("COOKIES_FILE", "").strip()
 ALSO_STORY = os.environ.get("ALSO_STORY", "").strip() == "1"
 CAPTION_TEMPLATE = os.environ.get("CAPTION_TEMPLATE", "{title}")
 DRY_RUN = os.environ.get("DRY_RUN", "").strip() == "1"
-
-RSS_URL = f"https://www.youtube.com/feeds/videos.xml?channel_id={YT_CHANNEL_ID}"
 
 
 def log(msg):
@@ -77,16 +76,17 @@ def die(msg, code=1):
 # ---------------------------------------------------------------------------
 def load_state():
     if not os.path.exists(STATE_FILE):
-        return {"posted": [], "seeded": False}
+        return {"posted": [], "seeded": False, "seeded_channels": []}
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
         data.setdefault("posted", [])
         data.setdefault("seeded", False)
+        data.setdefault("seeded_channels", [])
         return data
     except Exception as e:
         log(f"상태 파일 읽기 실패, 새로 시작합니다: {e}")
-        return {"posted": [], "seeded": False}
+        return {"posted": [], "seeded": False, "seeded_channels": []}
 
 
 def save_state(state):
@@ -97,8 +97,10 @@ def save_state(state):
 # ---------------------------------------------------------------------------
 # 1) RSS 피드에서 최신 영상 목록 읽기
 # ---------------------------------------------------------------------------
-def fetch_feed_videos():
-    req = urllib.request.Request(RSS_URL, headers={"User-Agent": "Mozilla/5.0"})
+def fetch_feed_videos(channel_id):
+    rss_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
+    log(f"RSS 피드 조회: {rss_url}")
+    req = urllib.request.Request(rss_url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(req, timeout=30) as resp:
         raw = resp.read()
     ns = {
@@ -340,8 +342,9 @@ def main():
     missing = [k for k, v in {
         "IG_USER_ID": IG_USER_ID,
         "IG_ACCESS_TOKEN": IG_TOKEN,
-        "YT_CHANNEL_ID": YT_CHANNEL_ID,
     }.items() if not v]
+    if not YT_CHANNEL_IDS:
+        missing.append("YT_CHANNEL_ID")
     if missing and not DRY_RUN:
         die(f"필수 환경변수 누락: {', '.join(missing)}")
 
@@ -351,25 +354,44 @@ def main():
 
     state = load_state()
     posted = set(state["posted"])
+    seeded_channels = set(state.get("seeded_channels", []))
 
-    log(f"RSS 피드 조회: {RSS_URL}")
-    videos = fetch_feed_videos()
-    log(f"피드에서 {len(videos)}개 영상 발견")
+    # 레거시 마이그레이션: 예전 단일 채널 시절 seeded=True 였다면
+    # 첫 번째 채널(기존 채널)은 이미 기준선이 잡힌 것으로 간주한다.
+    if state.get("seeded") and YT_CHANNEL_IDS and not seeded_channels:
+        seeded_channels.add(YT_CHANNEL_IDS[0])
+        log(f"기존 채널 {YT_CHANNEL_IDS[0]} 은 이미 기준선 처리됨(레거시 마이그레이션)")
 
-    # 최초 실행 시드: 기존 영상은 '이미 처리됨'으로 표시하고 아무것도 올리지 않는다.
-    # (과거 쇼츠 전체가 한꺼번에 인스타로 쏟아지는 것을 방지)
-    if not state["seeded"]:
-        for v in videos:
-            posted.add(v["id"])
-        state["posted"] = sorted(posted)
-        state["seeded"] = True
+    # 채널별로 피드를 읽고, 새 채널이면 기준선만 잡고 넘어간다.
+    new_videos = []
+    state_dirty = False
+    for ch in YT_CHANNEL_IDS:
+        try:
+            videos = fetch_feed_videos(ch)
+        except Exception as e:
+            log(f"[{ch}] 피드 조회 실패 → 이번 실행에서는 건너뜀: {e}")
+            continue
+        log(f"[{ch}] 피드에서 {len(videos)}개 영상 발견")
+
+        if ch not in seeded_channels:
+            # 새 채널 최초 등장: 현재 영상들을 '이미 처리됨'으로 기록만 하고 올리지 않는다.
+            # (과거 쇼츠 전체가 한꺼번에 인스타로 쏟아지는 것을 방지)
+            for v in videos:
+                posted.add(v["id"])
+            seeded_channels.add(ch)
+            state_dirty = True
+            log(f"[{ch}] 새 채널 기준선 저장 완료. 다음 실행부터 이 채널의 '새 쇼츠'만 올립니다.")
+            continue
+
+        # 새 영상만, 오래된 것부터 처리 (피드는 최신순)
+        new_videos.extend(v for v in reversed(videos) if v["id"] not in posted)
+
+    state["posted"] = sorted(posted)
+    state["seeded"] = True
+    state["seeded_channels"] = sorted(seeded_channels)
+    if state_dirty:
         save_state(state)
-        log("최초 실행: 현재 영상들을 기준선으로 저장했습니다. "
-            "다음 실행부터 '새 쇼츠'만 올립니다.")
-        return
 
-    # 새 영상만, 오래된 것부터 처리 (피드는 최신순)
-    new_videos = [v for v in reversed(videos) if v["id"] not in posted]
     log(f"미처리 영상 {len(new_videos)}개")
 
     uploaded = 0
