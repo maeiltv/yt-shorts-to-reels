@@ -153,6 +153,22 @@ def get_video_info(video_id):
         return None
 
 
+def pick_cover_url(info):
+    """유튜브 썸네일 중 가장 큰 JPG를 릴스 커버용으로 선택 (없으면 None)."""
+    best_area, best_url = -1, None
+    for t in (info.get("thumbnails") or []):
+        u = (t.get("url") or "").split("?")[0]
+        if not u.lower().endswith((".jpg", ".jpeg")):
+            continue
+        area = (t.get("width") or 0) * (t.get("height") or 0)
+        if area > best_area:
+            best_area, best_url = area, t.get("url")
+    if best_url:
+        return best_url
+    u = (info.get("thumbnail") or "")
+    return u if u.split("?")[0].lower().endswith((".jpg", ".jpeg")) else None
+
+
 def is_short(info):
     """세로형이고 SHORT_MAX_SECONDS 이하이면 쇼츠로 간주."""
     if not info:
@@ -319,12 +335,18 @@ def _publish_media(params, label):
     return published.get("id")
 
 
-def publish_reel(video_url, caption):
-    return _publish_media({
+def publish_reel(video_url, caption, cover_url=None):
+    params = {
         "media_type": "REELS",
         "video_url": video_url,
         "caption": caption,
-    }, "릴스")
+    }
+    if cover_url:
+        try:
+            return _publish_media({**params, "cover_url": cover_url}, "릴스")
+        except Exception as e:
+            log(f"  커버 지정 발행 실패 → 커버 없이 재시도: {e}")
+    return _publish_media(params, "릴스")
 
 
 def publish_story(video_url):
@@ -418,6 +440,9 @@ def main():
             continue
 
         caption = CAPTION_TEMPLATE.format(title=v["title"])
+        cover_url = pick_cover_url(info)
+        if cover_url:
+            log(f"  커버(유튜브 썸네일) 사용: {cover_url[:80]}...")
 
         if DRY_RUN:
             log(f"  [DRY_RUN] 여기서 발행 예정. caption={caption!r}")
@@ -440,7 +465,7 @@ def main():
         log(f"  공개 URL 확보: {public_url}")
 
         try:
-            media_id = publish_reel(public_url, caption)
+            media_id = publish_reel(public_url, caption, cover_url)
             log(f"  ✅ 릴스 발행 완료: media_id={media_id}")
             posted.add(vid)
             state["posted"] = sorted(posted)
